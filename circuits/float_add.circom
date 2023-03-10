@@ -298,15 +298,17 @@ template LeftShift(shift_bound) {
     less_than_bound2.in[1] <== shift_bound;
     //Done checks
     
+    //Begin actual computations
     component n2b = Num2Bits(num_bits_shift_bound + 1);
     n2b.in <== shift;
 
     signal left[num_bits_shift_bound + 1];
     left[num_bits_shift_bound] <== x;
     var multiplier;
+
     for(var i = num_bits_shift_bound - 1; i >= 0; i--){
-        multiplier = 1 << (1 << (i));
-        left[i] <== n2b.bits[i] * (left[i+1] * multiplier - left[i+1]) + left[i+1];
+        multiplier = 1 << (1 << (i)); //We have to multiply by 2 ** shift, and since i is the bit position, we need to compute 2 ** (2 ** i)
+        left[i] <== n2b.bits[i] * (left[i+1] * multiplier - left[i+1]) + left[i+1];     //If the bit is 1, we multiply the previous value by the previous one. If the bit is 0, we keep the old value. Hence, there is an IF condition here `cond * (a - b) + b. If cond = 1 => a, if cond = 0 => b.
     }
     y <== left[0];
 
@@ -314,7 +316,7 @@ template LeftShift(shift_bound) {
     component if_else = IfThenElse();
     if_else.cond <== skip_checks;
     if_else.L <== 1;
-    if_else.R <== less_than_bound.out * less_than_bound2.out;
+    if_else.R <== less_than_bound.out * less_than_bound2.out; //check the two bounds
 
     if_else.out === 1;
 }
@@ -333,19 +335,20 @@ template MSNZB(b) {
 
     component isZero = IsZero();
     isZero.in <== in;
+    //Done checks
 
     component toBits = Num2Bits(b + 1);
     toBits.in <== in;
-    signal bits[b + 1] <== toBits.bits;
 
     signal sawOne[b + 1]; //sawOne will be 0 until seeing the first 1 where it will be 1 forever.
-    sawOne[b] <== 0;        //initializer
+    sawOne[b] <== 0;      //initializer
+
     for(var i = b - 1; i >= 0; i--) {
-        sawOne[i] <== sawOne[i + 1] + (bits[i]) - (sawOne[i + 1] * (bits[i]));  //OR between whether we have ever seen a 1, with the current bit position.
+        sawOne[i] <== sawOne[i + 1] + toBits.bits[i] - (sawOne[i + 1] * toBits.bits[i]);  //OR between whether we have ever seen a 1, with the current bit position.
     }
     for(var i = 0; i < b; i++){
         one_hot[i] <== sawOne[i] + sawOne[i + 1] - 2 * sawOne[i] * sawOne[i + 1];   //XOR between subsequent positions. Since the MSB will have 0 as its 
-                                                                                    // neighbor, the MSB will be the only 1.
+        // neighbor, the MSB will be the only 1.
     }
 
     component if_else = IfThenElse();
@@ -379,12 +382,13 @@ template Normalize(k, p, P) {
     signal shifter[P + 1];
     shifter[0] <== 1;
     for(var i = 1; i < P + 1; i++){
-        shifter[i] <== msnzb.one_hot[i] * (i * shifter[i - 1] - shifter[i - 1]) + shifter[i - 1];
+        shifter[i] <== msnzb.one_hot[i] * (i * shifter[i - 1] - shifter[i - 1]) + shifter[i - 1]; //compute the needed shift with the help of a loop and 
+                                                                                                  //the previous value in an IF condition.
     }
     
     component left_shift = LeftShift(P);
     left_shift.x <== m;
-    left_shift.shift <== (P - shifter[P]);
+    left_shift.shift <== (P - shifter[P]);  //normalize according to the python code
     left_shift.skip_checks <== skip_checks;
     
     m_out <== left_shift.y;
@@ -411,6 +415,7 @@ template FloatAdd(k, p) {
     component checkWell2 = CheckWellFormedness(k, p);
     checkWell2.e <== e[1];
     checkWell2.m <== m[1];
+    //check well formedness done
 
     component left_shift1 = LeftShift(k + p);
     left_shift1.x <== e[0];
@@ -423,6 +428,7 @@ template FloatAdd(k, p) {
     left_shift2.shift <== p + 1;
     left_shift2.skip_checks <== 0;
     signal mgn2 <== left_shift2.y + m[1];
+    // left shifting here works better than the suggested alternative in the comment
     
     component mgn2_less_mgn1 = LessThan(k + p); //check mgn2 < mgn1
     mgn2_less_mgn1.in[0] <== mgn2;
@@ -433,7 +439,7 @@ template FloatAdd(k, p) {
     signal beta_e;
     signal beta_m;
 
-    alpha_e <== mgn2_less_mgn1.out * (e[0] - e[1]) + e[1];
+    alpha_e <== mgn2_less_mgn1.out * (e[0] - e[1]) + e[1]; //determine alpha_e, alpha_m, beta_e, beta_m using a selector.
     alpha_m <== mgn2_less_mgn1.out * (m[0] - m[1]) + m[1];
 
     beta_e <== (1 - mgn2_less_mgn1.out) * (e[0] - e[1]) + e[1];
@@ -448,10 +454,11 @@ template FloatAdd(k, p) {
     component is_alpha_e_zero = IsZero();
     is_alpha_e_zero.in <== alpha_e;
 
-    signal length <== less_p_1_diff.out + (is_alpha_e_zero.out) - less_p_1_diff.out * (is_alpha_e_zero.out);
+    signal length <== less_p_1_diff.out + (is_alpha_e_zero.out) - less_p_1_diff.out * (is_alpha_e_zero.out); // 1 if we can return early, otherwise 0.
 
     // The else condition
-    component alpha_m_prime = LeftShift(k + p);
+    component alpha_m_prime = LeftShift(k + p); //in practice, we only need to assign values to these input signals if we need it, otherwise it can 
+                                                //cause problems even though we don't need them.
     alpha_m_prime.x <== (1 - length) * alpha_m;
     alpha_m_prime.shift <== (1 - length) * diff;
     alpha_m_prime.skip_checks <== length;
@@ -468,6 +475,6 @@ template FloatAdd(k, p) {
     round_check.m <== normalized.m_out;
     // end else
     
-    e_out <== (length) * (alpha_e - round_check.e_out) + round_check.e_out;
+    e_out <== (length) * (alpha_e - round_check.e_out) + round_check.e_out; //if we can return early, we want to return the result we had before
     m_out <== (length) * (alpha_m - round_check.m_out) + round_check.m_out;
 }
