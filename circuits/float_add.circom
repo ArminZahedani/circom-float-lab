@@ -146,7 +146,20 @@ template CheckBitLength(b) {
     signal input in;
     signal output out;
 
-    // TODO
+    signal bits[b];
+
+    for (var i = 0; i < b; i++) {
+        bits[i] <-- (in >> i) & 1;
+        bits[i] * (1 - bits[i]) === 0;
+    }
+    var sum_of_bits = 0;
+    for (var i = 0; i < b; i++) {
+        sum_of_bits += (2 ** i) * bits[i];
+    }
+    component checker = IsEqual();
+    checker.in[0] <== sum_of_bits;
+    checker.in[1] <== in;
+    out <== checker.out;
 }
 
 /*
@@ -193,8 +206,22 @@ template CheckWellFormedness(k, p) {
 template RightShift(shift) {
     signal input x;
     signal output y;
+    
+    signal bits[shift];
+    signal rightShift[shift + 1];
 
-    // TODO
+    for (var i = 0; i < shift; i++) {
+        bits[i] <-- (x >> i) & 1;   //extracts the bits we shift away i.e. bits[0] is the first bit we shift away, bits[1] is the next
+        bits[i] * (1 - bits[i]) === 0;
+    }
+    signal intermediate <-- x >> shift; //do the actual bit shifts
+    rightShift[shift] <== intermediate;
+    for(var i = shift - 1; i >= 0; i+= -1) {
+        rightShift[i] <== (rightShift[i + 1] * 2) + bits[i];
+    }
+    x === rightShift[0];
+    y <== intermediate;
+
 }
 
 /*
@@ -254,7 +281,42 @@ template LeftShift(shift_bound) {
     signal input skip_checks;
     signal output y;
 
-    // TODO
+    //idea: if 0 <= shift then we can check if shift +1 is greater than 0 i.e. if shift = -1, then shift + 1 = 0 which is not greater than 1.
+    // if shift = 0, then shift + 1 = 1, which is greater than 0.
+
+    var num_bits_shift_bound = 0;
+    while(1 << num_bits_shift_bound < shift_bound){
+        num_bits_shift_bound++;
+    }
+
+    component less_than_bound = LessThan(num_bits_shift_bound + 1);
+    less_than_bound.in[0] <== 0;
+    less_than_bound.in[1] <== shift + 1; //check if 0 < shift + 1 i.e. 0 <= shift.
+
+    component less_than_bound2 = LessThan(num_bits_shift_bound + 1);
+    less_than_bound2.in[0] <== shift;
+    less_than_bound2.in[1] <== shift_bound;
+    //Done checks
+    
+    component n2b = Num2Bits(num_bits_shift_bound + 1);
+    n2b.in <== shift;
+
+    signal left[num_bits_shift_bound + 1];
+    left[num_bits_shift_bound] <== x;
+    var multiplier;
+    for(var i = num_bits_shift_bound - 1; i >= 0; i--){
+        multiplier = 1 << (1 << (i));
+        left[i] <== n2b.bits[i] * (left[i+1] * multiplier - left[i+1]) + left[i+1];
+    }
+    y <== left[0];
+
+    //if skip_checks = 1, then check only left shift, otherwise also bound.
+    component if_else = IfThenElse();
+    if_else.cond <== skip_checks;
+    if_else.L <== 1;
+    if_else.R <== less_than_bound.out * less_than_bound2.out;
+
+    if_else.out === 1;
 }
 
 /*
@@ -269,7 +331,30 @@ template MSNZB(b) {
     signal input skip_checks;
     signal output one_hot[b];
 
-    // TODO
+    component isZero = IsZero();
+    isZero.in <== in;
+
+    component toBits = Num2Bits(b + 1);
+    toBits.in <== in;
+    signal bits[b + 1] <== toBits.bits;
+
+    signal sawOne[b + 1]; //sawOne will be 0 until seeing the first 1 where it will be 1 forever.
+    sawOne[b] <== 0;        //initializer
+    for(var i = b - 1; i >= 0; i--) {
+        sawOne[i] <== sawOne[i + 1] + (bits[i]) - (sawOne[i + 1] * (bits[i]));  //OR between whether we have ever seen a 1, with the current bit position.
+    }
+    for(var i = 0; i < b; i++){
+        one_hot[i] <== sawOne[i] + sawOne[i + 1] - 2 * sawOne[i] * sawOne[i + 1];   //XOR between subsequent positions. Since the MSB will have 0 as its 
+                                                                                    // neighbor, the MSB will be the only 1.
+    }
+
+    component if_else = IfThenElse();
+    if_else.cond <== skip_checks;
+    if_else.L <== 1;
+    if_else.R <== 1 - isZero.out; //enforce NOT zero.
+
+    if_else.out === 1;
+
 }
 
 /*
@@ -287,7 +372,23 @@ template Normalize(k, p, P) {
     signal output m_out;
     assert(P > p);
 
-    // TODO
+    component msnzb = MSNZB(P + 1);
+    msnzb.in <== m;
+    msnzb.skip_checks <== skip_checks;
+
+    signal shifter[P + 1];
+    shifter[0] <== 1;
+    for(var i = 1; i < P + 1; i++){
+        shifter[i] <== msnzb.one_hot[i] * (i * shifter[i - 1] - shifter[i - 1]) + shifter[i - 1];
+    }
+    
+    component left_shift = LeftShift(P);
+    left_shift.x <== m;
+    left_shift.shift <== (P - shifter[P]);
+    left_shift.skip_checks <== skip_checks;
+    
+    m_out <== left_shift.y;
+    e_out <== e + shifter[P] - p;
 }
 
 /*
@@ -303,5 +404,70 @@ template FloatAdd(k, p) {
     signal output e_out;
     signal output m_out;
 
-    // TODO
+    component checkWell1 = CheckWellFormedness(k, p);
+    checkWell1.e <== e[0];
+    checkWell1.m <== m[0];
+
+    component checkWell2 = CheckWellFormedness(k, p);
+    checkWell2.e <== e[1];
+    checkWell2.m <== m[1];
+
+    component left_shift1 = LeftShift(k + p);
+    left_shift1.x <== e[0];
+    left_shift1.shift <== p + 1;
+    left_shift1.skip_checks <== 0;
+    signal mgn1 <== left_shift1.y + m[0];
+
+    component left_shift2 = LeftShift(k + p);
+    left_shift2.x <== e[1];
+    left_shift2.shift <== p + 1;
+    left_shift2.skip_checks <== 0;
+    signal mgn2 <== left_shift2.y + m[1];
+    
+    component mgn2_less_mgn1 = LessThan(k + p); //check mgn2 < mgn1
+    mgn2_less_mgn1.in[0] <== mgn2;
+    mgn2_less_mgn1.in[1] <== mgn1;
+
+    signal alpha_e;
+    signal alpha_m;
+    signal beta_e;
+    signal beta_m;
+
+    alpha_e <== mgn2_less_mgn1.out * (e[0] - e[1]) + e[1];
+    alpha_m <== mgn2_less_mgn1.out * (m[0] - m[1]) + m[1];
+
+    beta_e <== (1 - mgn2_less_mgn1.out) * (e[0] - e[1]) + e[1];
+    beta_m <== (1 - mgn2_less_mgn1.out) * (m[0] - m[1]) + m[1];
+
+    signal diff <== alpha_e - beta_e;
+
+    component less_p_1_diff = LessThan(k + p + 1);
+    less_p_1_diff.in[0] <== p + 1;
+    less_p_1_diff.in[1] <== diff;
+
+    component is_alpha_e_zero = IsZero();
+    is_alpha_e_zero.in <== alpha_e;
+
+    signal length <== less_p_1_diff.out + (is_alpha_e_zero.out) - less_p_1_diff.out * (is_alpha_e_zero.out);
+
+    // The else condition
+    component alpha_m_prime = LeftShift(k + p);
+    alpha_m_prime.x <== (1 - length) * alpha_m;
+    alpha_m_prime.shift <== (1 - length) * diff;
+    alpha_m_prime.skip_checks <== length;
+    signal m_new <== (1 - length) * (alpha_m_prime.y + beta_m);
+    signal e_new <== beta_e;
+
+    component normalized = Normalize(k, p, 2 * p + 1);
+    normalized.e <== (1 - length) * e_new;
+    normalized.m <== (1 - length) * m_new;
+    normalized.skip_checks <== (length);
+
+    component round_check = RoundAndCheck(k, p, 2 * p + 1);
+    round_check.e <== normalized.e_out;
+    round_check.m <== normalized.m_out;
+    // end else
+    
+    e_out <== (length) * (alpha_e - round_check.e_out) + round_check.e_out;
+    m_out <== (length) * (alpha_m - round_check.m_out) + round_check.m_out;
 }
